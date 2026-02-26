@@ -142,6 +142,19 @@ class DiTFlowConfig(PreTrainedConfig):
     # Loss computation
     do_mask_loss_for_padding: bool = False
 
+    # Data augmentation (training-time only)
+    color_jitter_enabled: bool = False
+    color_jitter_brightness: float = 0.05
+    color_jitter_contrast: float = 0.05
+    color_jitter_saturation: float = 0.05
+    color_jitter_hue: float = 0.05
+    gaussian_blur_enabled: bool = False
+    gaussian_blur_kernel_size: int = 3
+    gaussian_blur_sigma: tuple[float, float] = (0.1, 0.5)
+    random_sharpness_enabled: bool = False
+    random_sharpness_factor: float = 1.2
+    random_sharpness_p: float = 0.3
+
     # Training presets
     optimizer_lr: float = 1e-4
     optimizer_betas: tuple = (0.95, 0.999)

@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
+import torchvision
 
 from lerobot.utils.constants import (
     OBS_ENV_STATE,
@@ -346,6 +347,7 @@ class DiTFlowPolicy(PreTrainedPolicy):
         self,
         config: DiTFlowConfig,
         dataset_stats: dict[str, dict[str, torch.Tensor]] | None = None,
+        dataset_meta=None,
     ):
         """
         Args:
@@ -353,6 +355,8 @@ class DiTFlowPolicy(PreTrainedPolicy):
                 the configuration class is used.
             dataset_stats: Dataset statistics to be used for normalization. If not passed here, it is expected
                 that they will be passed with a call to `load_state_dict` before the policy is used.
+            dataset_meta: Dataset metadata passed by lerobot's make_policy factory. Accepted for
+                compatibility but not used directly by DiTFlowPolicy.
         """
         super().__init__(config)
         config.validate_features()
@@ -450,6 +454,61 @@ class DiTFlowPolicy(PreTrainedPolicy):
         return loss, None
 
 
+class AugmentedRgbEncoder(DiffusionRgbEncoder):
+    """DiffusionRgbEncoder with optional training-time data augmentations.
+
+    Adds ColorJitter, GaussianBlur, and RandomAdjustSharpness before the
+    existing crop + backbone pipeline.  All augmentations are disabled by
+    default and only applied when ``self.training is True``.
+    """
+
+    def __init__(self, config: DiTFlowConfig):
+        super().__init__(config)
+
+        # Build training augmentation pipeline from config flags.
+        aug_transforms: list[nn.Module] = []
+
+        if getattr(config, "color_jitter_enabled", False):
+            aug_transforms.append(
+                torchvision.transforms.ColorJitter(
+                    brightness=config.color_jitter_brightness,
+                    contrast=config.color_jitter_contrast,
+                    saturation=config.color_jitter_saturation,
+                    hue=config.color_jitter_hue,
+                )
+            )
+
+        if getattr(config, "gaussian_blur_enabled", False):
+            aug_transforms.append(
+                torchvision.transforms.GaussianBlur(
+                    kernel_size=config.gaussian_blur_kernel_size,
+                    sigma=config.gaussian_blur_sigma,
+                )
+            )
+
+        if getattr(config, "random_sharpness_enabled", False):
+            aug_transforms.append(
+                torchvision.transforms.RandomAdjustSharpness(
+                    sharpness_factor=config.random_sharpness_factor,
+                    p=config.random_sharpness_p,
+                )
+            )
+
+        if aug_transforms:
+            self.train_augmentation = torchvision.transforms.Compose(aug_transforms)
+            _names = [type(t).__name__ for t in aug_transforms]
+            print(f"  [AugmentedRgbEncoder] Training augmentations: {_names}")
+        else:
+            self.train_augmentation = None
+            print("  [AugmentedRgbEncoder] No training augmentations enabled.")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Apply pixel-level augmentations BEFORE crop + backbone (parent forward).
+        if self.training and self.train_augmentation is not None:
+            x = self.train_augmentation(x)
+        return super().forward(x)
+
+
 class DiTFlowModel(nn.Module):
     def __init__(self, config: DiTFlowConfig):
         super().__init__()
@@ -465,11 +524,11 @@ class DiTFlowModel(nn.Module):
         if self.config.image_features:
             num_images = len(self.config.image_features)
             if self.config.use_separate_rgb_encoder_per_camera:
-                encoders = [DiffusionRgbEncoder(config) for _ in range(num_images)]
+                encoders = [AugmentedRgbEncoder(config) for _ in range(num_images)]
                 self.rgb_encoder = nn.ModuleList(encoders)
                 global_cond_dim += encoders[0].feature_dim * num_images
             else:
-                self.rgb_encoder = DiffusionRgbEncoder(config)
+                self.rgb_encoder = AugmentedRgbEncoder(config)
                 global_cond_dim += self.rgb_encoder.feature_dim * num_images
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
